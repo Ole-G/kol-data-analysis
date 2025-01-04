@@ -1,0 +1,206 @@
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('Аналітика')
+    .addItem('Зібраи дані', 'analyzeKOLData')
+    .addToUi();
+}
+
+function analyzeKOLData() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var sheetName = 'Проміжні дані';
+  
+  ss.toast('Початок аналізу даних...', 'Processing', 5);
+  
+  // Delete the sheet if it exists
+  var sheet = ss.getSheetByName(sheetName);
+  if (sheet) {
+    ss.deleteSheet(sheet);
+  }
+  
+  // Create the sheet
+  sheet = ss.insertSheet(sheetName);
+  
+  // Folder ID
+  var folderId = [INSERT YOUR ID HERE];
+  
+  // Get the folder
+  var folder = DriveApp.getFolderById(folderId);
+  
+  // Get all CSV files in the folder
+  var files = folder.getFilesByType(MimeType.CSV);
+  
+  var headerWritten = false;
+  var row = 1; // Start from first row
+  
+  while (files.hasNext()) {
+    var file = files.next();
+    var content = file.getBlob().getDataAsString();
+    
+    // Parse the CSV
+    var data = Utilities.parseCsv(content);
+    
+    if (data.length === 0) {
+      continue; // Skip empty files
+    }
+    
+    if (!headerWritten) {
+      // Write the header
+      sheet.getRange(row, 1, 1, data[0].length).setValues([data[0]]);
+      row++;
+      headerWritten = true;
+    }
+    
+    // Skip header row
+    data = data.slice(1);
+    
+    var numRows = data.length;
+    if (numRows > 0) {
+      sheet.getRange(row, 1, numRows, data[0].length).setValues(data);
+      row += numRows;
+    }
+  }
+  
+  ss.toast('Імпорт даних завершено.', 'Processing', 5);
+  
+  // Delete unnecessary columns
+  deleteUnnecessaryColumns(sheet);
+  
+  ss.toast('Непотрібні стовпці видалено.', 'Processing', 5);
+  
+  // Delete rows based on 'DB' sheet
+  filterRowsBasedOnDB(sheet, ss.getSheetByName('DB'));
+  
+  ss.toast('Дані відфільтровано за таблицею "DB".', 'Processing', 5);
+  
+  // Copy data to 'KOL data' sheet
+  copyDataToKOLData(sheet, ss.getSheetByName('KOL data'));
+  
+  ss.toast('Дані скопійовано до таблиці "KOL data".', 'Processing', 5);
+  
+  // Delete the 'Проміжна фігнюшка' sheet
+  ss.deleteSheet(sheet);
+  
+  ss.toast('Тимчасову таблицю видалено.', 'Processing', 5);
+  
+  // Find the latest date in column G of 'KOL data'
+  var kolDataSheet = ss.getSheetByName('KOL data');
+  if (kolDataSheet) {
+    var dateColumnValues = kolDataSheet.getRange('G2:G').getValues(); // Skip header
+    var latestDate = null;
+    for (var i = 0; i < dateColumnValues.length; i++) {
+      var cellValue = dateColumnValues[i][0];
+      if (cellValue instanceof Date) {
+        if (!latestDate || cellValue > latestDate) {
+          latestDate = cellValue;
+        }
+      } else if (cellValue) {
+        // Try to parse date
+        var parsedDate = new Date(cellValue);
+        if (!isNaN(parsedDate.getTime())) {
+          if (!latestDate || parsedDate > latestDate) {
+            latestDate = parsedDate;
+          }
+        }
+      }
+    }
+    if (latestDate) {
+      var formattedDate = Utilities.formatDate(latestDate, ss.getSpreadsheetTimeZone(), 'dd.MM.yyyy');
+      ui.alert('Дані станом на ' + formattedDate + ' оновлені');
+    } else {
+      ui.alert('Не вдалося знайти останню дату в стовпці G.');
+    }
+  } else {
+    ui.alert('Таблиця "KOL data" не існує.');
+  }
+}
+
+function deleteUnnecessaryColumns(sheet) {
+  // Columns to keep (based on index, starting from 1)
+  var columnsToKeep = [1, 2, 3, 5, 7, 11, 12, 13];
+  
+  // Get the total number of columns
+  var lastColumn = sheet.getLastColumn();
+  
+  // Create a list of columns to delete
+  var columnsToDelete = [];
+  for (var i = 1; i <= lastColumn; i++) {
+    if (columnsToKeep.indexOf(i) === -1) {
+      columnsToDelete.push(i);
+    }
+  }
+  
+  // Delete columns from right to left to avoid shifting
+  columnsToDelete.sort(function(a, b) { return b - a; });
+  for (var j = 0; j < columnsToDelete.length; j++) {
+    sheet.deleteColumn(columnsToDelete[j]);
+  }
+}
+
+function filterRowsBasedOnDB(allDataSheet, dbSheet) {
+  var ui = SpreadsheetApp.getUi();
+  
+  if (!dbSheet) {
+    ui.alert('Таблиця "DB" не існує.');
+    return;
+  }
+  
+  // Get all values from column F of 'DB' sheet
+  var dbDataRange = dbSheet.getRange('F:F');
+  var dbValues = dbDataRange.getValues();
+  
+  // Build a Set of lower-case values from 'DB' sheet column F
+  var dbSet = new Set();
+  for (var i = 0; i < dbValues.length; i++) {
+    var value = dbValues[i][0];
+    if (value) { // Skip empty cells
+      dbSet.add(value.toString().toLowerCase());
+    }
+  }
+  
+  if (dbSet.size === 0) {
+    ui.alert('У стовпці F таблиці "DB" не знайдено даних.');
+    return;
+  }
+  
+  // Get all data from 'Проміжна фігнюшка' sheet
+  var allData = allDataSheet.getDataRange().getValues();
+  var header = allData[0];
+  var dataRows = allData.slice(1);
+  
+  // Build an array to hold rows to keep
+  var rowsToKeep = [header]; // Start with header
+  
+  for (var i = 0; i < dataRows.length; i++) {
+    var row = dataRows[i];
+    var valueInA = row[0]; // Column A
+    if (valueInA) {
+      var valueInALower = valueInA.toString().toLowerCase();
+      if (dbSet.has(valueInALower)) {
+        rowsToKeep.push(row);
+      }
+    }
+  }
+  
+  // Clear the sheet and write back the filtered data
+  allDataSheet.clearContents();
+  allDataSheet.getRange(1, 1, rowsToKeep.length, rowsToKeep[0].length).setValues(rowsToKeep);
+}
+
+function copyDataToKOLData(allDataSheet, kolDataSheet) {
+  var ui = SpreadsheetApp.getUi();
+  
+  if (!kolDataSheet) {
+    ui.alert('Таблиця "KOL data" не існує.');
+    return;
+  }
+  
+  // Clear existing data in 'KOL data' sheet
+  kolDataSheet.clearContents();
+  
+  // Get data from 'Проміжні дані' sheet
+  var data = allDataSheet.getDataRange().getValues();
+  
+  // Write data to 'KOL data' sheet
+  kolDataSheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+}
